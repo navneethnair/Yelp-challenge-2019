@@ -1,0 +1,565 @@
+---
+title: "Modern Data Mining - HW 4"
+author:
+- Muskan Arora
+- Navneeth Nair
+- Risha Kaushal
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.height=4, fig.width=6, warning = F)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(randomForest, tree, ISLR, rpart, rattle, pROC, partykit, ggplot2, glmnet, leaps, dplyr, tm, jsonlite,SnowballC, car, RColorBrewer, wordcloud2, wordcloud)
+
+# constants for homework assignments
+hw_num <- 4
+hw_due_date <- "14, December, 2019"
+```
+
+
+
+
+ Yelp challenge 2019
+
+Yelp has made their data available to public and launched Yelp challenge. [More information](https://www.yelp.com/dataset/). 
+
+For this case study, we downloaded the [data](https://www.yelp.com/dataset/download) and took a 20k subset from **review.json**. *json* is another format for data. It is flexible and commonly-used for websites. Each item/subject/sample is contained in a brace *{}*. Data is stored as **key-value** pairs inside the brace. *Key* is the counterpart of column name in *csv* and *value* is the content/data. Both *key* and *value* are quoted. Each pair is separated by a comma. The following is an example of one item/subject/sample.
+
+```{json}
+{
+  "key1": "value1",
+  "key2": "value2"
+}
+```
+
+
+**Data needed: yelp_review_20k.json available in Canvas.../Data/**
+
+**yelp_review_20k.json** contains full review text data including the user_id that wrote the review and the business_id the review is written for. Here's an example of one review.
+
+```{json}
+{
+    // string, 22 character unique review id
+    "review_id": "zdSx_SD6obEhz9VrW9uAWA",
+
+    // string, 22 character unique user id, maps to the user in user.json
+    "user_id": "Ha3iJu77CxlrFm-vQRs_8g",
+
+    // string, 22 character business id, maps to business in business.json
+    "business_id": "tnhfDv5Il8EaGSXZGiuQGg",
+
+    // integer, star rating
+    "stars": 4,
+
+    // string, date formatted YYYY-MM-DD
+    "date": "2016-03-09",
+
+    // string, the review itself
+    "text": "Great place to hang out after work: the prices are decent, and the ambience is fun. It's a bit loud, but very lively. The staff is friendly, and the food is good. They have a good selection of drinks.",
+
+    // integer, number of useful votes received
+    "useful": 0,
+
+    // integer, number of funny votes received
+    "funny": 0,
+
+    // integer, number of cool votes received
+    "cool": 0
+}
+```
+
+## Goal of the study
+
+The goals are 
+
+1) Try to identify important words associated with positive ratings and negative ratings. Collectively we have a sentiment analysis.  
+
+2) To predict ratings using different methods. 
+
+## 1. JSON data and preprocessing data
+
+i. Load *json* data
+
+The *json* data provided is formatted as newline delimited JSON (ndjson). It is relatively new and useful for streaming.
+```{json}
+{
+  "key1": "value1",
+  "key2": "value2"
+}
+{
+  "key1": "value1",
+  "key2": "value2"
+}
+```
+
+The traditional JSON format is as follows.
+```{json}
+[{
+  "key1": "value1",
+  "key2": "value2"
+},
+{
+  "key1": "value1",
+  "key2": "value2"
+}]
+```
+
+\newline
+
+We use `stream_in()` in the `jsonlite` package to load the JSON data (of ndjson format) as `data.frame`. (For the traditional JSON file, use `fromJSON()` function.)
+
+```{r}
+pacman::p_load(jsonlite)
+yelp_data <- jsonlite::stream_in(file("yelp_review_20k.json"), verbose = F)
+str(yelp_data)  
+
+# different JSON format
+# tmp_json <- toJSON(yelp_data[1:10,])
+# fromJSON(tmp_json)
+```
+
+\newline
+
+ii. Document term matrix (dtm)
+ 
+ Extract document term matrix for texts to keep words appearing at least .5% of the time among all 20000 documents. Go through the similar process of cleansing as we did in the lecture. 
+
+```{r, echo=T}
+# Create Corpus
+yelp_data.text <- yelp_data$text # take the text out
+yelpcorpus <- VCorpus(VectorSource(yelp_data.text))
+# Clean Data
+yelpcorpus_clean <- tm_map(yelpcorpus, content_transformer(tolower))
+yelpcorpus_clean <- tm_map(yelpcorpus_clean, removeWords, stopwords("english"))
+yelpcorpus_clean <- tm_map(yelpcorpus_clean, removePunctuation)
+yelpcorpus_clean <- tm_map(yelpcorpus_clean, removeNumbers)
+yelpcorpus_clean <- tm_map(yelpcorpus_clean, stemDocument, lazy = TRUE)
+# Create document term matrix
+dtm <- DocumentTermMatrix(yelpcorpus_clean)
+# Reduce size of the bag
+dtm.05 <- removeSparseTerms(dtm, 1-.005) # sparsity < .995
+# dim(as.matrix(dtm.05))
+```
+
+\newline
+
+a) Briefly explain what does this matrix record? What is the cell number at row 100 and column 405? What does it represent?
+
+```{r}
+as.matrix(dtm.05)[100, 405]
+colnames(dtm.05)[405]
+```
+
+\newline  
+
+**This matrix records the number of occurences of each word in each document. Each column represents a unique word and each row represents a document. The number is 0 at row 100 and column 405. It means that there are 0 occurences of word 405 ("experi") in document 100.**
+
+\newline
+
+b) What is the sparsity of the dtm obtained here? What does that mean?
+
+\newline 
+
+**The sparsity of the dtm is 0.995. It means that it only includes terms that are found at least once in 0.05% of documents.**
+
+\newline
+
+iii. Set the stars as a two category response variable called rating to be “1” = 5,4 and “0”= 1,2,3. Combine the variable rating with the dtm as a data frame called data2. 
+
+```{r}
+yelp_data$rating <- c(0)
+yelp_data$rating[yelp_data$stars >= 4] <- 1
+yelp_data$rating <- as.factor(yelp_data$rating)
+data2 <- data.frame(rating = yelp_data$rating, as.matrix(dtm.05))
+# dim(data2)
+# names(data2)
+```
+
+\newline
+
+## Analysis
+
+Get a training data with 13000 reviews and the 5000 reserved as the testing data. Keep the rest (2000) as our validation data set. 
+
+```{r}
+set.seed(123)
+n <- nrow(data2)
+train.index <- sample(n, 13000)
+data2.train <- data2[train.index,]
+test.index <- sample(n-13000, 5000)
+data2.test <- data2[-train.index,][test.index,]
+data2.validate <- data2[-train.index,][-test.index,]
+```
+
+\newline
+
+## 2. LASSO
+
+i. Use the training data to get Lasso fit. Choose lambda.1se. Keep the result here.
+
+```{r, echo=T}
+y <- data2.train$rating
+#X <- as.matrix(data2train[, -c(1)]) # we can use as.matrix directly here
+set.seed(123)
+#### Be careful to run the following LASSO.
+# result.lasso <- cv.glmnet(X, y, alpha=.99, family="binomial")
+# save(result.lasso, file="TextMining.RData")
+### or try `sparse.model.matrix()` which is much faster
+X1 <- sparse.model.matrix(rating~., data=data2.train)[, -1]
+result.lasso <- cv.glmnet(X1, y, alpha=.99, family="binomial")
+plot(result.lasso)
+save(result.lasso, file="TextMining.RData")
+load("TextMining.RData")
+#plot(result.lasso)
+```
+
+
+```{r, echo=T}
+betalasso <- coef(result.lasso, s="lambda.1se") # output lasso estimates
+beta <- betalasso[which(betalasso !=0),] # non zero beta's
+beta <- as.matrix(beta)
+beta <- rownames(beta)
+```
+
+\newline
+
+ii. Feed the output from Lasso above, get a logistic regression. 
+	
+\newline
+
+	Relaxed LASSO results:
+	
+```{r, echo=T}
+glm.input <- as.formula(paste("rating", "~", paste(beta[-1],collapse = "+"))) # prepare the formulae
+result.glm <- glm(glm.input, family=binomial, data2.train)
+```
+
+\newline
+
+a) Pull out all the positive coefficients and the corresponding words. Rank the coefficients in a decreasing order. Report the leading 2 words and the coefficients. Describe briefly the interpretation for those two coefficients. 
+
+```{r, echo=F, results=T}
+sort(result.glm$coefficients, decreasing = T)[1:2]
+```
+
+\newline
+
+**The words "thorough" and "delish" are most indicative of positive reviews.**  
+**The logodds of positive reviews increases by 2.79 and 2.54 for every occurrence of the words thorough and delish respectively**
+
+\newline
+
+b) Make a word cloud with the top 100 positive words according to their coefficients. Interpret the cloud briefly.
+
+```{r}
+result.glm.coef <- coef(result.glm)
+# pick up the positive coef's which are positively related to the prob of being a good review
+good.glm <- result.glm.coef[which(result.glm.coef > 0)]
+good.glm <- good.glm[-1] # took intercept out
+good.fre <- sort(good.glm, decreasing = TRUE) # sort the coef's
+good.word <- names(good.fre) # good words with a decreasing order in the coeff's
+# Draw word cloud
+cor.special <- brewer.pal(8,"Dark2") # set up a pretty color scheme
+wordcloud(good.word, good.fre # make a word cloud
+          , colors=cor.special, ordered.colors=F)
+```
+
+\newline
+
+**Based on the relative size of the words, it seems that (in addition to "delish" and "thorough"), "delight", "outstand", and "gem" are highly indicative of a good review.**  
+**"outstand" is an obvious one, as it captures all word-forms of "outstanding", and customers are likely to leave positive reviews for outstanding restaurants.**  
+
+\newline
+
+c) Repeat i) and ii) for the bag of negative words.
+
+```{r}
+# pick up the positive coef's which are positively related to the prob of being a good review
+bad.glm <- result.glm.coef[which(result.glm.coef < 0)]
+bad.fre <- 0.2*sort(-bad.glm, decreasing = T) # sort the coef's
+bad.word <- names(bad.fre) # good words with a decreasing order in the coeff's
+# Draw word cloud
+cor.special <- brewer.pal(6,"Dark2") # set up a pretty color scheme
+wordcloud(bad.word, bad.fre # make a word cloud
+          , colors=cor.special, ordered.colors=F)
+```
+
+\newline
+
+**The words "unprofession" and "ignor" are most indicative of negative reviews.**  
+**For every appearance of these words in a review, the probability of it being a bad review increases the most.**
+
+**Based on the relative size of the words, it seems that (in addition to "unprofession" and "ignor"), "worst", "mediocr", and "horribl" are highly indicative of a bad review.**  
+
+\newline
+
+d) Summarize the findings. 
+
+**The results are in line with our expectations.**  
+**As expected, words like "delish", "thorough", "gem" and "outstand" are strongly indicative of positive reviews.**  
+**Also as expected, words like "unprofession", "mediocr", "ignor", "worst", and "horribl" are strongly indicative of negative reviews.** 
+
+\newline
+
+iii. Using majority votes find the testing errors
+
+i) From Lasso fit in 3)
+	
+```{r, warning=F, results=T}
+predict.lasso.p <- predict(result.lasso, as.matrix(data2.test[, -1]), type = "response", s="lambda.1se")
+# output lasso estimates of prob's
+predict.lasso <- predict(result.lasso, as.matrix(data2.test[, -1]), type = "class", s="lambda.1se")
+# LASSO testing errors
+testerror.lasso  <- mean(data2.test$rating != predict.lasso)
+# ROC curve for LASSO estimates
+pROC::roc(data2.test$rating, predict.lasso.p, plot=TRUE)
+```
+
+\newline
+
+**Misclassification error `r testerror.lasso`.
+AUC is [0.9325]**
+
+\newline
+
+	ii) From logistic regression in 4)
+	
+```{r, warning=F, results=T}
+predict.glm <- predict(result.glm, data2.test, type = "response")
+class.glm <- rep("0", 5000)
+class.glm[predict.glm > .5] <- "1"
+testerror.glm <- mean(data2.test$rating != class.glm)
+pROC::roc(data2.test$rating, predict.glm, plot=T)
+```
+
+**Misclassification error `r testerror.glm`.
+AUC is [0.9256].**
+	
+\newline
+	
+	iii) Which one is smaller?
+
+\newline
+
+**Using majority votes, we find that LASSO has a smaller testing error**
+
+\newline
+
+## 3. Random Forest  
+
+Now train the data using the training data set by RF. Get the testing error. Also explain how the RF works and how you tune the tuning parameters (`mtry` and `ntree`). 
+
+**First we tune ntree**
+```{r}
+fit.rf <- randomForest(rating~., data2.train, mtry=5, ntree=100) # change ntree
+plot(fit.rf)
+legend("topright", colnames(fit.rf$err.rate), col=1:3, cex=0.8, fill=1:3)
+```
+
+
+**We seem to need at least 250 trees to settle the misclassification errors.**
+   
+**Tune mtry**
+```{r, eval = F}
+set.seed(1)
+rf.error.p <- 1:10  # set up a vector of length p (total number of parameters)
+for (p in 1:10)  # repeat the following code inside { } p times
+{
+  fit.rf <- randomForest(rating~., data2train, mtry=p, ntree=100)
+  rf.error.p[p] <- mean(data2train$rating != fit.rf$predicted)  # collecting oob mce based on 100 trees
+}
+
+plot(1:10, rf.error.p, pch=16,
+     xlab="mtry",
+     ylab="OOB mse of mtry")
+lines(1:10, rf.error.p)
+```
+
+**We decide to set mtry = 5.**  
+
+
+```{r, echo=F, results=T}
+# fit.rf <- randomForest(rating~., data2.train, mtry=5, ntree=250)
+predict.rf.test.p <- predict(fit.rf, newdata = data2.test, type = "prob")
+predict.rf.test <- predict(fit.rf, newdata = data2.test, type = "class")
+rf.test.err <- mean(data2.test$rating != predict.rf.test)
+rf.roc <- pROC::roc(data2.test$rating, predict.rf.test.p[,2], plot = T)
+rf.roc
+auc.rf.roc <- round(pROC::auc(rf.roc),4)
+```
+
+**The misclassification error is `r rf.test.err`.**  
+**AUC is `r auc.rf.roc`.**
+
+**To do a RF, begin by taking a bootstrap sample of size n.**  
+**Next, build a tree using the bootstrap sample: Randomly select mtry variables. For each of these variables, find the best split point such that the misclassification error is minimized by majority vote. Find the best variable and split point, and split the node into two. The end nodes (leaves) will output the majority vote of either 0 or 1.**  
+**Repeat this process ntree times to build out the RF.**  
+**The prediction will be estimated by the majority vote of the aggregated trees.**  
+**The probability will be estimated by the sample proportion of 1’s among aggregated trees.**  
+**We can tune the RF by selecting the mtry that minimizes misclassification error and smallest ntree that gives us low misclassification errors.**  
+
+\newline
+
+## 4. Neural Network
+
+\newline
+
+Train a neural net with two layers with a reasonable number of neutrons in each layer (say 20). You could try a different number of layers and different number of neutrons and see how the results change. Settle down on one final architecture. Report the testing errors. 
+
+\newline
+
+
+
+```{r} 
+# Create x matrices taking the values of 0 and 1 (with 0 meaning the word does not appear in the review and 1 meaning the word does). -->
+# minone <- function(x) {min(1,x)} -->
+# data2.x <- as.data.frame(lapply(data2[-1], FUN = function(x) {sapply(x, FUN = minone)})) -->
+# data2.y <- as.numeric(data2$rating) -->
+# data2.x <- data2 %>% select(-c(rating)) 
+# data2.y <- data2$rating   
+``` 
+
+
+
+```{r}
+# simple_net <- data.frame(Y = data2.y[1:500],'Word' = data2.x[1:500,1:5])
+# plot(neuralnet::neuralnet(as.factor(Y)~Word.abl+Word.absolut+Word.accept+Word.accommod+Word.acknowledg, data = simple_net, hidden = 4), rep = "best") 
+``` 
+
+**We first set up internal training and validation data sets.**
+
+```{r}
+# Split data 
+# n <- nrow(data2)
+# validation.index <- sample(n, 2000) 
+
+# data2.val <- data2[validation.index, ] 
+# data2.xval <- as.matrix(data2.val[,-1]) 
+# data2.yval <- as.matrix(as.numeric(data2.val[,1])-1) 
+# data2.xtrain <- data2[-validation.index, -1] #dim(data3_xtrain) 
+# data2.ytrain <- as.numeric(data2[-validation.index, 1])-1
+# data2.xtrain <- as.matrix(data2.xtrain) 
+# data2.ytrain <- as.matrix(data2.ytrain) 
+
+# Set up validation set internally -->
+# val_indices <- 1:2000
+# x_val <- as.matrix(data2.xtrain[val_indices,]) # internal testing data 
+# partial_x_train <- as.matrix(data2.xtrain[-val_indices,]) # training data 
+# y_val <- as.matrix(data2.ytrain[val_indices]) 
+#  partial_y_train <- as.matrix(data2.ytrain[-val_indices]) 
+```
+
+**We then build a 2-layer model with 20 nodes in each layer.**
+
+```{r, warning=F}
+##Define the Model -->
+# model <- keras_model_sequential() %>% 
+# layer_dense(units = 16, activation = "relu", input_shape = c(dim(data2)[2]-1)) %>% # 1 layer with 16 neurons -->
+# layer_dense(units = 8, activation = "relu") %>% # layer 2 with 8 neurons -->
+# layer_dense(units = 1, activation = "sigmoid")
+# print(model)
+```
+
+**This yields the following results:**
+
+```{r} 
+ # Compile the Model -->
+# model %>% compile( 
+# optimizer = "rmsprop", 
+# loss = "binary_crossentropy", 
+# metrics = c("accuracy") )
+
+# fit1 <- model %>% fit( 
+# partial_x_train, 
+# partial_y_train, 
+# epochs = 30, 
+# batch_size = 512,
+# validation_data = list(x_val, y_val)) 
+# plot(fit1) 
+``` 
+
+**Retraining the final model: It looks like that epochs=4 gives us the smallest entropy.**
+
+```{r}
+# model <- keras_model_sequential() %>% 
+# layer_dense(units = 16, activation = "relu", input_shape = c(dim(data2)[2]-1)) %>% 
+# layer_dense(units = 8, activation = "relu") %>% 
+# layer_dense(units = 1, activation = "sigmoid") 
+# model %>% compile( 
+# optimizer = "rmsprop", 
+# loss = "binary_crossentropy", 
+# metrics = c("accuracy"))
+# model %>% fit(data2.xtrain, data2.ytrain, epochs = 4, batch_size = 512)
+```
+
+**Results: Finally we evaluate the nn equation model using our validation data.**
+
+
+```{r, echo=T, results=F}
+# results.val <- model %>% evaluate(data2.xval, data2.yval); results.val
+# predict.nn.test <- model %>% predict(data2.xval)
+# nn.test.err <- 1-as.numeric(results.val[2])
+#Testing error is `r nn.test.err`.
+```
+
+\newline
+
+## 5. Final model
+
+Which classifier(s) seem to produce the least testing error? Are you surprised? Report the final model and accompany the validation error. Once again this is THE only time you use the validation data set.  For the purpose of prediction, comment on how would you predict a rating if you are given a review (not a tm output) using our final model? 
+
+**We summarize the testing errors for all 3 methods (LASSO, RF, NN):**
+
+**We do not add NN to this since we are unable to stitch the NN here**
+
+```{r, echo=T, results=T, warning=F, message=F}
+data.frame("LASSO" = testerror.lasso, "Random Forest" = rf.test.err)
+```
+
+\newline
+
+**The Lasso produced lowest testing error.This was surprising since we expected random forests to be good at capturing complex interactions in a flexible manner.** 
+
+**As such, we select it as the final model.**  
+
+```{r, echo=F, warning=F, message=F, results= F}
+# LASSO Validation Error
+predict.lasso.val <- predict(result.lasso, as.matrix(data2.validate[, -1]), type = "class", s="lambda.1se")
+lasso.val.err  <- mean(data2.validate$rating != predict.lasso.val)
+lasso.val.err
+# RF Validation Error
+#predict.rf.val <- predict(fit.rf, newdata = data2.validate, type = "class")
+#rf.val.err <- mean(data2.validate$rating != predict.rf.val)
+#rf.val.err
+# NN Validation Error
+# data2.xvalidate <- as.matrix(data2.validate[,-1])
+# data2.yvalidate <- as.matrix(as.numeric(data2.validate[,1])-1)
+# results.validate <- model %>% evaluate(data2.xvalidate, data2.yvalidate)
+# predict.nn.test <- model %>% predict(data2.xval)
+# nn.val.err <- 1-as.numeric(results.validate[2])
+```
+
+
+\newline
+
+
+**The validation error for this model is: `r lasso.val.err`**
+**If we are given a review, we would first identify the number of occurences of each word in the review.**  
+**With this information, we could use lasso logistic regression to predict the probability of it being a good review.**  
+\newline
+
+**Finally, we would decide on a threshold (likely 0.5) based on a loss function and bayes rule to determine if we classify it as a good review or a bad review.**
